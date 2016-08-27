@@ -1,16 +1,12 @@
 import fs from "fs";
 import proto from "../proto";
 
-import * as CFG from "../../cfg";
-
-let asset = fs.readFileSync(CFG.ASSET_DIGEST_PATH);
+import CFG from "../../cfg";
 
 /**
- * @param {Request} req
+ * @param {Player} player
  * @return {Object}
  */
-export default function GetAssetDigest(req) {
-
-  return (asset);
-
+export default function GetAssetDigest(player) {
+  return (player.asset_digest.buffer);
 }

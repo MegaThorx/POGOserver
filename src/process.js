@@ -1,11 +1,15 @@
-import * as CFG from "../cfg";
+import fs from "fs";
+
+import CFG from "../cfg";
+
+const helpMessage = fs.readFileSync(".help", "utf8");
 
 export function processCommand(cmd, data) {
   switch (cmd) {
     // How many active connections there are
     case "/clients":
       var length = this.clients.length;
-      this.print(`${length}:${CFG.SERVER_MAX_CONNECTIONS} connected players!`, 33);
+      this.print(`${length}:${CFG.MAX_CONNECTIONS} connected players!`, 33);
     break;
     // Exit the server
     case "/exit":
@@ -25,30 +29,25 @@ export function processCommand(cmd, data) {
       this.greet();
     break;
     case "/help":
-      this.printHelp();
+      console.log("\x1b[36;1m==================================== HELP =====================================\x1b[0m");
+      console.log(`\x1b[${CFG.DEFAULT_CONSOLE_COLOR};1m${helpMessage}\x1b[0m`);
+      console.log("\x1b[36;1m===============================================================================\x1b[0m");
     break;
     case "/save":
       this.saveAllPlayers();
       var length = this.clients.length;
       this.print(`Saved ${length} player${length === 1 ? "": "s"} into database!`);
     break;
+    case "/spawn":
+      this.spawnPkmnAtPlayer(data[1], data[2], data[3] || 1);
+    break;
+    case "/update":
+      eval(fs.readFileSync("update.js", "utf8"));
+    break;
     default:
       this.print(`${cmd} is not a valid command!`, 31);
     break;
   };
-};
-
-export function printHelp() {
-
-  console.log("\x1b[36;1m===================================== HELP =====================================\x1b[0m");
-  this.print("clients                      : how many players are connected");
-  this.print("exit                         : exit the server");
-  this.print("kick [PlayerUsername]        : kick player by username");
-  this.print("kickall                      : kick all players");
-  this.print("clear                        : clear the server console");
-  this.print("save                         : save all palyers into database");
-  console.log("\n\x1b[36;1m================================================================================\x1b[0m");
-
 };
 
 export function stdinInput(data) {
@@ -62,7 +61,7 @@ export function stdinInput(data) {
 export function uncaughtException(excp) {
   switch (excp.errno) {
     case "EADDRINUSE":
-      this.print(`Port ${CFG.SERVER_PORT} is already in use!`, 31);
+      this.print(`Port ${CFG.PORT} is already in use!`, 31);
     break;
     case "EACCES":
       this.print("No root privileges!", 31);

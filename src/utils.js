@@ -1,8 +1,7 @@
 import Long from "long";
 import proto from "./proto";
-import { DownloadUrls } from "./res";
 
-import * as CFG from "../cfg";
+import CFG from "../cfg";
 
 /**
  * @param {Object} cls
@@ -59,62 +58,42 @@ export function decodeLong(long) {
 }
 
 /**
- * @param  {String} pm
- * @return {Object}
+ * @return {Number}
  */
-export function getDownloadUrl(pm) {
-
-  let ii = 0;
-  let length = DownloadUrls.length;
-
-  let node = null;
-
-  for (; ii < length; ++ii) {
-    node = DownloadUrls[ii];
-    if (node.bundle_name === pm) {
-      return (node);
-    }
-  };
-
-  return (null);
-
-}
-
-/**
- * @param  {String} pm
- * @return {Object}
- */
-export function getDownloadUrlByAssetId(id) {
-
-  let ii = 0;
-  let length = DownloadUrls.length;
-
-  let node = null;
-  let index = 0;
-
-  for (; ii < length; ++ii) {
-    node = DownloadUrls[ii];
-    if (node.asset_id.substring(index) === id) {
-      return (node);
-    }
-  };
-
-  return (null);
-
-}
-
-export function getGenerationIdByAssetId(asset_id) {
-
-  let index = asset_id.lastIndexOf("/") + 1;
-  
-  return (
-    parseInt(asset_id.substring(index))
-  );
-
-}
-
 export function randomRequestId() {
   return (
     1e18 - Math.floor(Math.random() * 1e18)
+  );
+}
+
+/**
+ * @param {String} key
+ * @return {String}
+ */
+export function _toCC(key) {
+  key = key.toLowerCase();
+  let res = key[0].toUpperCase() + key.substring(1, key.length).replace(/_\s*([a-z])/g, function(d, e) {
+    return e.toUpperCase();
+  });
+  return (res);
+}
+
+/**
+ * @param {Number} index
+ * @return {String}
+ */
+export function idToPkmnBundleName(index) {
+  return (
+    "pm" + (index >= 10 ? index >= 100 ? "0" : "00" : "000") + index
+  );
+}
+
+/**
+ * @param {String} str
+ * @return {String}
+ */
+export function capitalize(str) {
+  return (
+    str[0].toUpperCase() + str.slice(1)
   );
 }

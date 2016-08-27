@@ -1,4 +1,5 @@
 import proto from "../proto";
+import POGOProtos from "pokemongo-protobuf";
 
 /**
  * @param {Object} obj
@@ -6,12 +7,13 @@ import proto from "../proto";
  */
 export default function DownloadRemoteConfigVersion(obj) {
 
-  return (
-    new proto.Networking.Responses.DownloadRemoteConfigVersionResponse({
-      result: 1,
-      item_templates_timestamp_ms: new Date().getTime() * 1e3,
-      asset_digest_timestamp_ms: new Date().getTime() * 1e3
-    }).encode()
-  );
+  let buffer = {
+    "result": "SUCCESS",
+    "item_templates_timestamp_ms": "1471650700946",
+    "asset_digest_timestamp_ms": "1467338276561000",
+    "$unknownFields": []
+  }
+
+  return POGOProtos.serialize(buffer, "POGOProtos.Networking.Responses.DownloadRemoteConfigVersionResponse");
 
 }

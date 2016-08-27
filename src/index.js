@@ -1,33 +1,40 @@
 import fs from "fs";
+import os from "os";
+import fse from "fs-extra";
 import http from "http";
 import proto from "./proto";
+import EventEmitter from "events";
 
 import {
-  inherit
+  inherit,
+  _toCC
 } from "./utils";
 
-import * as CFG from "../cfg";
+import CFG from "../cfg";
 
-import pogodown from "pogo-asset-downloader";
-
+import * as _api from "./api";
 import * as _setup from "./setup";
 import * as _cycle from "./cycle";
 import * as _player from "./player";
 import * as _request from "./request";
 import * as _response from "./response";
 import * as _process from "./process";
-import * as _mongo from "./db/mongo";
-import * as _mysql from "./db/mysql";
+import * as _mysql from "./db/index";
+import * as _mysql_get from "./db/get";
+import * as _mysql_query from "./db/query";
+import * as _mysql_create from "./db/create";
 
 const greetMessage = fs.readFileSync(".greet", "utf8");
 
 /**
  * @class GameServer
  */
-class GameServer {
+export default class GameServer extends EventEmitter {
 
   /** @constructor */
   constructor() {
+
+    super(null);
 
     this.STATES = {
       PAUSE: false,
@@ -40,11 +47,9 @@ class GameServer {
       collections: {}
     };
 
-    this.proto = null;
+    this.assets = {};
+    this.master = null;
     this.socket = null;
-    this.player = null;
-    this.request = null;
-    this.response = null;
     this.cycleInstance = null;
 
     // Timer things
@@ -56,10 +61,28 @@ class GameServer {
     this.passedTicks = 0;
 
     this.clients = [];
+    this.wild_pokemons = [];
 
-    this.greet();
+    this.initAPI();
+
+    if (CFG.GREET) this.greet();
+
+    this.print(`Booting Server v${require("../package.json").version}...`, 33);
+
     this.setup();
 
+  }
+
+  initAPI() {
+    if (CFG.ENABLE_API) {
+      for (let key in _api) {
+        this.on(key, _api[key]);
+      };
+    }
+    // make sure we still have our print fn
+    else {
+      this.on("print", _api["print"]);
+    }
   }
 
   clientAlreadyConnected(client) {
@@ -78,48 +101,21 @@ class GameServer {
 
   }
 
-  createAssetDownloadSession() {
-
-    return new Promise((resolve) => {
-      pogodown.login({
-        provider: String(CFG.SERVER_POGO_CLIENT_PROVIDER).toLowerCase(),
-        username: CFG.SERVER_POGO_CLIENT_USERNAME,
-        password: CFG.SERVER_POGO_CLIENT_PASSWORD,
-        downloadModels: false
-      }).then(() => {
-        this.print("Created asset download session");
-        resolve();
-      });
-    });
-
-  }
-
-  /**
-   * @param  {Array} assets
-   */
-  generateDownloadUrlByAssetId(assets) {
-    return new Promise((resolve) => {
-      pogodown.getAssetByAssetId(assets).then((response) => {
-        // maybe cache and provide own local download link?
-        resolve(response);
-      });
-    });
-  }
-
   /**
    * @return {HTTP}
    */
   createHTTPServer() {
     let server = http.createServer((req, res) => {
-      if (this.clients.length >= CFG.SERVER_MAX_CONNECTIONS) {
+      if (this.clients.length >= CFG.MAX_CONNECTIONS) {
         this.print(`Server is full! Refused ${req.headers.host}`, 31);
         return void 0;
       }
-      this.response = res;
-      // client already connected
-      if (!this.clientAlreadyConnected(req)) {
-        this.addPlayer(req);
-      }
+
+      let player = null;
+
+      if (this.clientAlreadyConnected(req)) player = this.getPlayerByRequest(req);
+      else player = this.addPlayer(req, res);
+
       let chunks = [];
       req.on("data", (chunk) => {
         chunks.push(chunk);
@@ -127,11 +123,11 @@ class GameServer {
       req.on("end", () => {
         let buffer = Buffer.concat(chunks);
         req.body = buffer;
-        this.request = req;
+        player.updateResponse(res);
         this.routeRequest(req, res);
       });
     });
-    server.listen(CFG.SERVER_PORT);
+    server.listen(CFG.PORT);
     return (server);
   }
 
@@ -139,14 +135,9 @@ class GameServer {
 
     return new Promise((resolve) => {
 
-      let name = String(CFG.SERVER_USE_DATABASE).toUpperCase();
+      let name = String(CFG.DATABASE_TYPE).toUpperCase();
 
       switch (name) {
-        case "MONGO":
-        case "MONGODB":
-          inherit(GameServer, _mongo);
-          this.setupConnection().then(resolve);
-        break;
         case "MYSQL":
           inherit(GameServer, _mysql);
           this.setupConnection().then(resolve);
@@ -175,10 +166,120 @@ class GameServer {
   /**
    * @param {String} msg
    * @param {Number} color
+   * @param {Boolean} nl
    */
-  print(msg, color) {
-    color = Number.isInteger(color) ? color : CFG.SERVER_DEFAULT_CONSOLE_COLOR;
-    console.log(`[Console] \x1b[${color};1m${msg}\x1b[0m`);
+  print(msg, color, nl) {
+    this.emit("print", msg, color, nl);
+  }
+
+  /**
+   * @param {String} msg
+   * @param {Function} func
+   * @param {Number} timer
+   */
+  retry(msg, func, timer) {
+    process.stdout.clearLine();
+    process.stdout.cursorTo(0);
+    this.print(`${msg}${timer}s`, 33, true);
+    if (timer >= 1) setTimeout(() => this.retry(msg, func, --timer), 1e3);
+    else {
+      process.stdout.write("\n");
+      func();
+    }
+  }
+
+  /**
+   * @param  {Request} req
+   * @param  {Array} res
+   * @return {Object}
+   */
+  decode(req, res) {
+
+    // clone
+    req = JSON.parse(JSON.stringify(req));
+    res = JSON.parse(JSON.stringify(res));
+
+    // dont decode unknown6, since it bloats the file size
+    delete req.unknown6;
+
+    // decode requests
+    for (let request of req.requests) {
+      let key = _toCC(request.request_type);
+      let msg = request.request_message;
+      if (msg) {
+        let proto = `POGOProtos.Networking.Requests.Messages.${key}Message`;
+        request.request_message = this.parseProtobuf(new Buffer(msg.data), proto);
+      }
+    };
+
+    // decode responses
+    let index = 0;
+    for (let resp of res) {
+      let key = _toCC(req.requests[index].request_type);
+      let msg = new Buffer(resp);
+      let proto = `POGOProtos.Networking.Responses.${key}Response`;
+      res[index] = this.parseProtobuf(msg, proto);
+      index++;
+    };
+
+    // clone again to build response out of it
+    let req2 = JSON.parse(JSON.stringify(req));
+
+    // build res base out of req
+    delete req2.requests;
+    req2.returns = res;
+    req2.status_code = 1;
+
+    return ({
+      req: req,
+      res: res
+    });
+
+  }
+
+  dumpTraffic(req, res) {
+
+    let decoded = this.decode(req, res);
+
+    let out = {
+      Request: decoded.req,
+      Response: decoded.res
+    };
+
+    try {
+      let decoded = JSON.stringify(out, null, 2);
+      fse.outputFileSync(CFG.DEBUG_DUMP_PATH + Date.now(), decoded);
+    } catch (e) {
+      this.print("Dump traffic: " + e, 31);
+    }
+
+  }
+
+  getLocalIPv4() {
+    let address = null;
+    let interfaces = os.networkInterfaces();
+    for (var dev in interfaces) {
+      interfaces[dev].filter((details) => details.family === "IPv4" && details.internal === false ? address = details.address: void 0);
+    };
+    return (address);
+  }
+
+  directoryExists(directory) { 
+    try {
+      fs.statSync(directory);
+      return true;
+    } catch(e) {
+      return false;
+    }
+  }
+
+  fileExists(path) {
+    try {
+      fs.statSync(path);
+    } catch (e) {
+      return (false);
+    }
+    return (true);
   }
 
   greet() {
@@ -193,13 +294,22 @@ inherit(GameServer, _player);
 inherit(GameServer, _request);
 inherit(GameServer, _response);
 inherit(GameServer, _process);
+inherit(GameServer, _mysql);
+inherit(GameServer, _mysql_get);
+inherit(GameServer, _mysql_query);
+inherit(GameServer, _mysql_create);
 
-let server = new GameServer();
 
-process.openStdin().addListener("data", function(data) {
-  server.stdinInput(data);
-});
+((Server) => {
 
-process.on("uncaughtException", function(data) {
-  server.uncaughtException(data);
-});
+  const server = new Server();
+
+  process.openStdin().addListener("data", (data) => {
+    server.stdinInput(data);
+  });
+
+  process.on("uncaughtException", (data) => {
+    server.uncaughtException(data);
+  });
+
+})(GameServer);

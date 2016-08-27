@@ -1,21 +1,22 @@
-import * as CFG from "../../cfg";
+import CFG from "../../cfg";
 
 import proto from "../proto";
+import POGOProtos from "pokemongo-protobuf";
 
 /**
  * @param {Request} req
  * @return {Object}
  */
-export default function SetFavoritePokemon(req) {
+export default function SetFavoritePokemon(player, req) {
 
-  let data = proto.Networking.Requests.Messages.SetFavoritePokemonMessage.decode(req.request_message.toBuffer());
-console.log(data);
-  // TODO: save into db
+  let buffer = {
+    "result": "SUCCESS",
+  };
+
+  player.setFavoritePkmn(req.pokemon_id << 0, req.is_favorite);
 
   return (
-    new proto.Networking.Responses.SetFavoritePokemonResponse({
-      result: proto.Networking.Responses.SetFavoritePokemonResponse.Result.ERROR_POKEMON_NOT_FOUND
-    }).encode()
+    POGOProtos.serialize(buffer, "POGOProtos.Networking.Responses.SetFavoritePokemonResponse")
   );
 
 }

@@ -1,11 +1,18 @@
 import proto from "./proto";
 
-import * as CFG from "../cfg";
+import CFG from "../cfg";
 
 import {
   getHashCodeFrom,
   decodeRequestEnvelope
 } from "./utils";
+
+import {
+  ResponseEnvelope,
+  ResponseEnvelopeAuth
+} from "./packets";
+
+import jwtDecode from "jwt-decode";
 
 import { GetPlayer } from "./packets";
 
@@ -18,9 +25,10 @@ class Player {
   constructor(obj) {
 
     this.uid = -1;
+    this.owner_id = -1;
 
-    this.email = null;
-    this.username = "undefined";
+    this._email = null;
+    this.username = "unknown";
  
     this.latitude = 0;
     this.longitude = 0;
@@ -30,6 +38,7 @@ class Player {
     this.send_push_notifications = false;
 
     this.exp = 0;
+    this.level = 1;
 
     this.stardust = 0;
     this.pokecoins = 0;
@@ -46,13 +55,54 @@ class Player {
     this.gender = 0;
     this.backpack = 0;
 
-    this.tutorial_state = [32, 1, 3, 4, 7];
+    this.items = {
+      poke_ball: 0,
+      great_ball: 0,
+      ultra_ball: 0,
+      master_ball: 0,
+      potion: 0,
+      super_potion: 0,
+      hyper_potion: 0,
+      max_potion: 0,
+      revive: 0,
+      max_revive: 0,
+      lucky_egg: 0,
+      incense_ordinary: 0,
+      incense_spicy: 0,
+      incense_cool: 0,
+      incense_floral: 0,
+      troy_disk: 0,
+      razz_berry: 0,
+      bluk_berry: 0,
+      nanab_berry: 0,
+      wepar_berry: 0,
+      pinap_berry: 0,
+      incubator_basic: 0,
+      incubator_basic_unlimited: 0,
+      pokemon_storage_upgrade: 0,
+      storage_upgrade: 0
+    };
+
+    this.party = [];
+
+    this.tutorial_state = [];
 
     this.badges = null;
     this.pokedex = null;
     this.inventory = null;
 
-    this.response = obj.response;
+    this.asset_digest = null;
+
+    this.hasSignature = false;
+
+    this.isIOS = false;
+    this.isAndroid = false;
+
+    this.isPTCAccount = false;
+    this.isGoogleAccount = false;
+
+    this.request = obj.request;
+    this.response = null;
     this.connection = obj.connection;
 
     this.timeout = obj.timeout;
@@ -65,6 +115,15 @@ class Player {
     this.loggedIn = obj.loggedIn || false;
     this.authenticated = false;
 
+    this.authentications = 0;
+
+  }
+
+  get email() {
+    return (this._email);
+  }
+  set email(value) {
+    this._email = value.replace("@gmail.com", "");
   }
 
   /**
@@ -74,42 +133,63 @@ class Player {
     this.uid = getHashCodeFrom(String(email));
   }
 
+  /**
+   * @param {Buffer} buffer
+   */
+  sendResponse(buffer) {
+    this.response.end(buffer);
+  }
+
+  /**
+   * @param {Response} res
+   */
+  updateResponse(res) {
+    this.response = res;
+  }
+
   updateByObject(obj) {
     for (let key in obj) {
       if (this.hasOwnProperty(key)) {
-        this[key] = obj[key];
+        if (key === "send_marketing_emails" || key === "send_push_notifications") {
+          this[key] = !!obj[key];
+        }
+        else {
+          this[key] = obj[key];
+        }
+      }
+      else if (key.substring(0, 5) === "item_") {
+        let name = key.substring(5, key.length);
+        this.items[name] = obj[key];
+      }
+      else if (key === "id") {
+        this.owner_id = obj[key];
       }
     };
   }
 
   /**
-   * @param {Request} req
+   * @param {Object} obj
    */
-  updatePosition(req) {
-
-    let data = decodeRequestEnvelope(req.request_message.buffer);
-
-    this.latitude = data.latitude;
-    this.longitude = data.longitude;
-    this.altitude = data.altitude;
-
+  updatePosition(obj) {
+    this.latitude = obj.latitude;
+    this.longitude = obj.longitude;
   }
 
   updateAvatar(req) {
 
-    let data = proto.Networking.Requests.Messages.SetAvatarMessage.decode(req.request_message.toBuffer()).player_avatar;
+    let node = null;
 
-    if (!data) return void 0;
-
-    this.skin = data.skin;
-    this.hair = data.hair;
-    this.shirt = data.shirt;
-    this.pants = data.pants;
-    this.hat = data.hat;
-    this.shoes = data.shoes;
-    this.eyes = data.eyes;
-    this.gender = data.gender;
-    this.backpack = data.backpack;
+    for (let key in req.player_avatar) {
+      node = req.player_avatar[key];
+      if (key === "gender") {
+        this.gender = node === "FEMALE" ? 1 : 0;
+      }
+      else {
+        if (this.hasOwnProperty(key)) {
+          this[key] = node;
+        }
+      }
+    };
 
   }
 
@@ -124,6 +204,42 @@ class Player {
 
   }
 
+  getPkmnIndexFromPartyById(id) {
+    for (let ii = 0; ii < this.party.length; ++ii) {
+      if (this.party[ii].id === id) return (ii);
+    };
+    return (-1);
+  }
+
+  getPkmnFromPartyById(id) {
+    let index = this.getPkmnIndexFromPartyById(id);
+    return (this.party[index]);
+  }
+
+  deletePkmnFromParty(id) {
+    let index = this.getPkmnIndexFromPartyById(id);
+    let pkmn = this.party[index];
+    if (pkmn) this.party.splice(index, 1);
+  }
+
+  setFavoritePkmn(id, favorite) {
+    let pkmn = this.getPkmnFromPartyById(id);
+    if (pkmn) pkmn.favorite = favorite;
+  }
+
+}
+
+/**
+ * @param {String} name
+ * @return {Boolean}
+ */
+export function validPlayerName(name) {
+  return !(
+    name === null ||
+    name === void 0 ||
+    typeof name === "string" &&
+    name.length <= 1
+  );
 }
 
 /**
@@ -192,18 +308,23 @@ export function getPlayerByName(name) {
 
 /**
  * @param {Request} req
+ * @return {Player}
  */
 export function addPlayer(req) {
 
   let connection = req.connection;
 
-  this.clients.push(new Player({
+  let player = new Player({
     timeout: this.time,
     connection: connection,
-    response: this.response,
+    request: req,
     remotePort: connection.remotePort,
     remoteAddress: req.headers.host
-  }));
+  });
+
+  this.clients.push(player);
+
+  return (player);
 
 }
 
@@ -217,6 +338,7 @@ export function removePlayer(player) {
   if (index >= 0) {
     this.clients.splice(index, 1);
     this.print(`${player.remoteAddress} disconnected!`, 36);
+    this.emit("killPlayer", player);
   }
   else {
     this.print("Failed at removing player", 33);
@@ -226,15 +348,42 @@ export function removePlayer(player) {
 
 /**
  * @param {String} name
+ * @param {String} pkmn
+ */
+export function spawnPkmnAtPlayer(name, pkmn, amount) {
+
+  if (!this.validPlayerName(name)) {
+    this.print(`Invalid player name!`, 31);
+    return void 0;
+  }
+
+  let spawn = null;
+  let player = this.getPlayerByName(name);
+
+  if (player !== null) {
+    let index = 0;
+    while (++index <= amount) {
+      spawn = {
+        pokemon_id: pkmn.toUpperCase(),
+        cp: Math.random() * 1e3 << 0,
+        encounter_id: Math.random() * 1e5 << 0,
+        latitude: player.latitude + parseFloat((Math.random() / 1e3).toFixed(5)),
+        longitude: player.longitude + parseFloat((Math.random() / 1e3).toFixed(5))
+      };
+      this.wild_pokemons.push(spawn);
+    };
+    this.print(`Spawned ${amount}x ${pkmn}'s to ${name} at ${spawn.latitude.toFixed(7)}:${spawn.longitude.toFixed(7)}!`);
+  }
+  else this.print(`Failed to spawn ${pkmn} to player ${name}!`, 31);
+
+}
+
+/**
+ * @param {String} name
  */
 export function kickPlayer(name) {
 
-  if (
-    name === null ||
-    name === void 0 ||
-    typeof name === "string" &&
-    name.length <= 1
-  ) {
+  if (!this.validPlayerName(name)) {
     this.print(`Invalid player name!`, 31);
     return void 0;
   }
@@ -271,42 +420,38 @@ export function removeAllPlayers() {
 export function savePlayer(player) {
   return new Promise((resolve) => {
     if (player.authenticated) {
-      this.updateUser(player).then(resolve);
+      this.updateUser(player).then(() => {
+        this.updateUserItems(player).then(() => {
+          this.updateUserParty(player).then(() => {
+            // refresh player data by database
+            this.loginPlayer(player).then(resolve);
+          });
+        });
+      });
     }
   });
 }
 
-export function loginPlayer() {
-
-  let buffer = null;
-  let player = this.player;
-
-  return new Promise((resolve) => {
-    this.getUserByEmail(player.email).then((doc) => {
-      player.updateByObject(doc);
-      buffer = GetPlayer(player).encode();
-      resolve(buffer);
-    });
-  });
-
-}
-
-export function forwardPlayer() {
-
-  let player = this.player;
+/**
+ * @param {Player} player
+ */
+export function forwardPlayer(player) {
 
   return new Promise((resolve) => {
     this.getUserByEmail(player.email).then((doc) => {
       if (player.email.length) {
-        this.print(`${player.email.replace("@gmail.com", "")} authenticated!`, 36);
+        let provider = player.isGoogleAccount ? "Google" : "PTC";
+        this.print(`${player.email} authenticated via ${provider}!`, 36);
       }
-      if (doc === void 0 || doc && !doc.length) {
-        this.registerPlayer().then((res) => {
+      if (doc) {
+        this.loginPlayer(player).then((res) => {
+          this.emit("loginPlayer", player);
           resolve(res);
         });
       }
       else {
-        this.loginPlayer().then((res) => {
+        this.registerPlayer(player).then((res) => {
+          this.emit("registerPlayer", player);
           resolve(res);
         });
       }
@@ -315,18 +460,97 @@ export function forwardPlayer() {
 
 }
 
-export function registerPlayer() {
+/**
+ * @param {Player} player
+ */
+export function loginPlayer(player) {
 
-  let player = this.player;
+  return new Promise((resolve) => {
+    this.getUserByEmail(player.email).then((user) => {
+      user = user[0];
+      this.getPkmnByColumn("owner_id", user.id).then((party) => {
+        player.updateByObject(user);
+        player.party = party;
+        let buffer = GetPlayer(player);
+        resolve(buffer);
+      });
+    });
+  });
+
+}
+
+/**
+ * @param {Player} player
+ */
+export function registerPlayer(player) {
 
   return new Promise((resolve) => {
     this.createUser(player).then(() => {
-      this.print(`${this.player.email.replace("@gmail.com", "")} registered!`, 36);
-      player.tutorial_state = [];
-      this.loginPlayer().then((res) => {
+      this.print(`${player.email} registered!`, 36);
+      this.loginPlayer(player).then((res) => {
         resolve(res);
       });
     });
   });
+
+}
+
+/**
+ * @param {Player} player
+ * @return {Buffer}
+ */
+export function authenticatePlayer(player) {
+
+  let request = decodeRequestEnvelope(player.request.body);
+
+  let msg = ResponseEnvelopeAuth({
+    id: request.request_id
+  });
+
+  let token = request.auth_info;
+
+  // TODO: Support PTC server authentification
+
+  if (!token || !token.provider) {
+    this.print("Invalid authentication token! Kicking..", 31);
+    this.removePlayer(player);
+    return void 0;
+  }
+
+  if (token.provider === "google") {
+    if (token.token !== null) {
+      let decoded = jwtDecode(token.token.contents);
+      player.generateUid(decoded.email);
+      player.email = decoded.email;
+      player.email_verified = decoded.email_verified;
+      player.isGoogleAccount = true;
+      this.print(`${player.email} connected!`, 36);
+    }
+    else {
+      this.print("Invalid authentication token! Kicking..", 31);
+      this.removePlayer(player);
+      return void 0;
+    }
+  }
+  else if (token.provider === "ptc") {
+    let decoded = token.token.contents;
+    player.isPTCAccount = true;
+    player.email = decoded.split("-")[1];
+    player.email_verified = true;
+    player.isPTCAccount = true;
+    //console.log(decoded);
+    this.print("PTC auth isnt supported yet! Your progress wont get saved!", 33);
+    //this.removePlayer(player);
+    //return void 0;
+  }
+  else {
+    this.print("Invalid provider! Kicking..", 31);
+    this.removePlayer(player);
+    return void 0;
+  }
+
+  player.authenticated = true;
+
+  return (msg);
 
 }

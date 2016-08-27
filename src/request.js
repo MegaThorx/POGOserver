@@ -1,142 +1,195 @@
 import fs from "fs";
+import url from "url";
 import proto from "./proto";
+import pcrypt from "pcrypt";
+import POGOProtos from "pokemongo-protobuf";
 
-import * as CFG from "../cfg";
-import { REQUEST } from "./requests";
+import CFG from "../cfg";
 
 import {
   ResponseEnvelope,
-  ResponseEnvelopeAuth,
   AuthTicket,
-  GetInventory
+  ShopData
 } from "./packets";
-
-import {
-  decodeLong,
-  decodeRequestEnvelope
-} from "./utils";
-
-import jwtDecode from "jwt-decode";
-
-/**
- * @return {Buffer}
- */
-export function authenticatePlayer() {
-
-  let player = this.player;
-
-  let request = decodeRequestEnvelope(this.getRequestBody());
-
-  let msg = ResponseEnvelopeAuth({
-    id: request.request_id
-  });
-
-  let token = request.auth_info;
-
-  if (token.provider === "google") {
-    if (token.token !== null) {
-      let decoded = jwtDecode(token.token.contents);
-      player.generateUid(decoded.email);
-      player.email = decoded.email;
-      player.email_verified = decoded.email_verified;
-      this.print(`${player.email.replace("@gmail.com", "")} connected!`, 36);
-    }
-    else {
-      this.print("Invalid authentication token! Kicking..", 31);
-      this.removePlayer(player);
-      return void 0;
-    }
-  }
-
-  player.authenticated = true;
-
-  return (msg);
-
-}
-
-/**
- * @param  {Request} req
- * @return {String}
- */
-export function getRequestType(req) {
-
-  for (let key in REQUEST) {
-    if (REQUEST[key] === req.request_type) {
-      return (key);
-    }
-  };
-
-  return ("INVALID");
-
-}
 
 /**
  * @param {Request} req
  * @param {Response} res
  */
-export function onRequest(req, res) {
+export function routeRequest(req, res) {
 
-  this.player = this.getPlayerByRequest(req);
-  this.player.response = res;
+  let player = this.getPlayerByRequest(req);
 
-  let player = this.player;
+  let parsed = url.parse(req.url).pathname;
+  let route = parsed.split("/");
+  let host = req.headers.host;
+
+  switch (route[1]) {
+    case "plfe":
+    case "custom":
+      if (route[2] === "rpc") this.onRequest(req);
+    break;
+    case "model":
+      // make sure no random dudes can access download
+      if (!player.authenticated || !player.email_verified) return void 0;
+      let name = route[2];
+      if (name && name.length > 1) {
+        let folder = player.isAndroid ? "android/" : "ios/";
+        fs.readFile("data/" + folder + name, (error, data) => {
+          if (error) {
+            this.print(`Error file resolving model ${name}:` + error, 31);
+            return void 0;
+          }
+          this.print(`Sent ${name} to ${player.email}`, 36);
+          res.end(data);
+        });
+      }
+    break;
+    case "om":
+      if (
+        route[2] === "glm" &&
+        route[3] === "mmap"
+      ) {
+        this.print(`Received gmaps request!`, 33);
+      }
+    break;
+    default:
+      console.log(`Unknown request url: https://${req.headers.host}${req.url}`);
+    break;
+  };
+
+}
+
+export function parseProtobuf(buffer, path) {
+  try {
+    return POGOProtos.parseWithUnknown(buffer, path);
+  } catch (e) {
+    this.print(e, 31);
+  }
+}
+
+/**
+ * @param {Request} req
+ */
+export function parseSignature(req) {
+  let key = pcrypt.decrypt(req.unknown6.unknown2.encrypted_signature);
+  return (
+    POGOProtos.parseWithUnknown(key, "POGOProtos.Networking.Envelopes.Signature")
+  );
+}
+
+/**
+ * @param {Request} req
+ */
+export function onRequest(req) {
+
+  let player = this.getPlayerByRequest(req);
 
   // Validate email verification
   if (player.authenticated) {
     if (!player.email_verified) {
-      this.print(`${player.email.replace("@gmail.com", "")}'s email isnt verified, kicking..`, 31);
+      this.print(`${player.email}'s email isnt verified, kicking..`, 31);
       this.removePlayer(player);
       return void 0;
     }
   }
 
-  let request = proto.Networking.Envelopes.RequestEnvelope.decode(req.body);
+  let request = this.parseProtobuf(req.body, "POGOProtos.Networking.Envelopes.RequestEnvelope");
 
-  if (CFG.SERVER_LOG_REQUESTS) {
+  request.requests = request.requests || [];
+
+  if (CFG.DEBUG_LOG_REQUESTS) {
     console.log("#####");
     request.requests.map((request) => {
-      console.log("Got request:", this.getRequestType(request));
+      console.log("Got request:", request.request_type);
     }).join(",");
   }
 
   if (!player.authenticated) {
-    this.send(this.authenticatePlayer());
+    player.sendResponse(this.authenticatePlayer(player));
     return void 0;
   }
 
-  this.processRequests(request.requests).then((answer) => {
-    let msg = this.envelopResponse(1, request.request_id, answer, request.hasOwnProperty("auth_ticket"));
-    this.send(msg);
+  if (!request.requests.length) {
+    // send shop data
+    if (request.unknown6 && request.unknown6.request_type === 6) {
+      let msg = this.envelopResponse(1, [], request, !!request.auth_ticket, true);
+      player.sendResponse(msg);
+    }
+    // otherwise invalid
+    else {
+      this.print("Received invalid request!", 31);
+      return void 0;
+    }
+  }
+
+  this.processRequests(player, request.requests).then((returns) => {
+    if (CFG.DEBUG_DUMP_TRAFFIC) {
+      this.dumpTraffic(request, returns);
+    }
+    let msg = this.envelopResponse(1, returns, request, player, !!request.auth_ticket, false);
+    player.sendResponse(msg);
   });
 
 }
 
 /**
  * @param  {Number} status
- * @param  {Long} id
- * @param  {Array} response
+ * @param  {Array} returns
+ * @param  {Request} req
+ * @param  {Player} player
  * @param  {Boolean} auth
+ * @param  {Boolean} shop
  * @return {Buffer}
  */
-export function envelopResponse(status, id, response, auth) {
+export function envelopResponse(status, returns, req, player, auth, shop) {
 
-  let answer = ResponseEnvelope({
-    id: id,
-    status: status,
-    response: response
-  });
+  let buffer = req;
 
-  if (auth) answer.auth_ticket = AuthTicket();
+  delete buffer.requests;
 
-  return (answer);
+  buffer.returns = returns;
+
+  // get players device platform one time
+  if (player.hasSignature === false && buffer.unknown6 && buffer.unknown6.unknown2) {
+    let sig = this.parseSignature(buffer);
+    if (sig.device_info !== void 0) {
+      player.isIOS = sig.device_info.device_brand === "Apple";
+      player.isAndroid = !player.isIOS;
+      player.hasSignature = true;
+      player.asset_digest = this.assets[player.isAndroid ? "android" : "ios"];
+      this.print(`${player.email} is playing with an ${player.isIOS ? "Apple" : "Android"} device!`, 36);
+    }
+  }
+
+  if (auth) buffer.auth_ticket = AuthTicket();
+  if (shop) buffer.unknown6 = [ShopData()];
+
+  if (buffer.unknown6 && !shop) {
+    buffer.unknown6 = [{
+      "response_type": 6,
+      "unknown2": {
+        "unknown1": "1",
+        "items": [],
+        "player_currencies": []
+      }
+    }];
+  }
+
+  buffer.status_code = status;
+
+  return (
+    POGOProtos.serialize(buffer, "POGOProtos.Networking.Envelopes.ResponseEnvelope")
+  );
 
 }
 
 /**
+ * @param  {Player} player
  * @param  {Array} requests
  * @return {Array}
  */
-export function processRequests(requests) {
+export function processRequests(player, requests) {
 
   return new Promise((resolve) => {
 
@@ -145,7 +198,7 @@ export function processRequests(requests) {
     let body = [];
 
     let loop = (index) => {
-      this.processResponse(requests[index]).then((request) => {
+      this.processResponse(player, requests[index]).then((request) => {
         body.push(request);
         if (++index >= length) resolve(body);
         else return loop(index);
@@ -159,58 +212,9 @@ export function processRequests(requests) {
 }
 
 /**
- * @param {Request} req
- * @param {Response} res
- */
-export function routeRequest(req, res) {
-
-  let url = String(req.url);
-  let route = url.substring(url.lastIndexOf("/") + 1);
-  let host = req.headers.host;
-
-  switch (route) {
-    case "rpc":
-      this.onRequest(req, res);
-    break;
-    case "oauth":
-      let out = null;
-      let buffer = req.body.toString();
-      let signature = "321187995bc7cdc2b5fc91b11a96e2baa8602c62";
-      if (/Email.*com.nianticlabs.pokemongo/.test(buffer)) {
-        out = new Buffer(buffer.replace(/&client_sig=[^&]*&/, "&client_sig=" + signature + "&"));
-      }
-      console.log("OAUTH", out);
-      if (out instanceof Buffer) this.send(out);
-    break;
-    default:
-      console.log(`Unknown request url: https://${req.headers.host}${req.url}`);
-    break;
-  };
-
-}
-
-/**
  * @param  {Request} req
  * @return {Boolean}
  */
 export function validRequest(req) {
   return (true);
-}
-
-/**
- * @return {Buffer}
- */
-export function getRequestBody() {
-  return (
-    this.request.body
-  );
-}
-
-/**
- * @param {Buffer} buffer
- */
-export function send(buffer) {
-
-  this.player.response.end(buffer);
-
 }
